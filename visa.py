@@ -59,8 +59,8 @@ def send_notification(msg):
 
     if SENDGRID_API_KEY:
         message = Mail(
-            from_email="aleks998@outlook.com",
-            to_emails="aleks998@outlook.com",
+            from_email=USERNAME,
+            to_emails=USERNAME,
             subject=msg,
             html_content=msg)
         try:
