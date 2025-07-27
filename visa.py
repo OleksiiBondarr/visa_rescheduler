@@ -5,7 +5,7 @@ import json
 import random
 import platform
 import configparser
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from selenium import webdriver
@@ -36,7 +36,7 @@ PUSH_USER = config['PUSHOVER']['PUSH_USER']
 LOCAL_USE = config['CHROMEDRIVER'].getboolean('LOCAL_USE')
 HUB_ADDRESS = config['CHROMEDRIVER']['HUB_ADDRESS']
 
-REGEX_CONTINUE = "//a[contains(text(),'Continuar')]"
+REGEX_CONTINUE = "//a[contains(text(),'Continue')]"
 
 
 # def MY_CONDITION(month, day): return int(month) == 11 and int(day) >= 5
@@ -53,13 +53,14 @@ APPOINTMENT_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCH
 EXIT = False
 
 
+
 def send_notification(msg):
     print(f"Sending notification: {msg}")
 
     if SENDGRID_API_KEY:
         message = Mail(
-            from_email=USERNAME,
-            to_emails=USERNAME,
+            from_email="aleks998@outlook.com",
+            to_emails="aleks998@outlook.com",
             subject=msg,
             html_content=msg)
         try:
@@ -100,7 +101,7 @@ def login():
     time.sleep(STEP_TIME)
 
     print("Login start...")
-    href = driver.find_element(By.XPATH, '//*[@id="header"]/nav/div[2]/div[1]/ul/li[3]/a')
+    href = driver.find_element(By.XPATH, '//*[@id="header"]/nav/div[1]/div[1]/div[2]/div[1]/ul/li[3]/a')
     href.click()
     time.sleep(STEP_TIME)
     Wait(driver, 60).until(EC.presence_of_element_located((By.NAME, "commit")))
@@ -138,23 +139,66 @@ def do_login_action():
         EC.presence_of_element_located((By.XPATH, REGEX_CONTINUE)))
     print("\tlogin successful!")
 
+def do_open_rescheduling():
+    href = driver.find_element(By.XPATH, '//*[@id="main"]/div[2]/div[2]/div[1]/div[1]/div[1]/div[1]/div[2]/ul/li[1]/a')
+    href.click()
+    time.sleep(STEP_TIME)
+
+    href = driver.find_element(By.XPATH, '//*[@id="forms"]/ul/li[3]/a')
+    href.click()
+    time.sleep(STEP_TIME)
+
+    href = driver.find_element(By.XPATH, '//*[@id="forms"]/ul/li[3]/div[1]/div[1]/div[2]/p[2]/a')
+    href.click()
+    time.sleep(STEP_TIME)
+
+def prepare_session():
+    selenium_cookies = driver.get_cookies()
+    session = requests.Session()
+    for cookie in selenium_cookies:
+        additional_dict = {"domain": cookie['domain'], 'path': cookie['path']}
+        session.cookies.set(cookie['name'], cookie['value'], **additional_dict)
+    user_agent = driver.execute_script("return navigator.userAgent;")
+    session.headers.update({'User-Agent': user_agent})
+
+    csrf_token = driver.execute_script("""
+            return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+        """)
+    if csrf_token:
+        session.headers.update({'X-CSRF-Token': csrf_token})
+        session.headers.update({'x-requested-with': 'XMLHttpRequest'})
+
+    session.headers.update({
+        'Referer': APPOINTMENT_URL
+    })
+    session.headers.update(
+        {'Accept': 'application/json, text/javascript, */*; q=0.01'}
+    )
+    return session
 
 def get_date():
-    driver.get(DATE_URL)
-    if not is_logged_in():
-        login()
-        return get_date()
-    else:
-        content = driver.find_element(By.TAG_NAME, 'pre').text
-        date = json.loads(content)
-        return date
 
+    session = prepare_session()
+    # Now make your API request
+    print("calling get dates")
+    response = session.get(DATE_URL)
+
+    print(response.json())
+    if (response.status_code != 200):
+        login()
+        do_open_rescheduling()
+        return get_date()
+
+    else:
+        date = json.loads(response.text)
+        return date
 
 def get_time(date):
     time_url = TIME_URL % date
-    driver.get(time_url)
-    content = driver.find_element(By.TAG_NAME, 'pre').text
-    data = json.loads(content)
+    session = prepare_session()
+    response = session.get(time_url)
+
+    data = json.loads(response.text)
     time = data.get("available_times")[-1]
     print(f"Got time successfully! {date} {time}")
     return time
@@ -165,7 +209,7 @@ def reschedule(date):
     print(f"Starting Reschedule ({date})")
 
     time = get_time(date)
-    driver.get(APPOINTMENT_URL)
+    # driver.get(APPOINTMENT_URL)
 
     data = {
         "utf8": driver.find_element(by=By.NAME, value='utf8').get_attribute('value'),
@@ -177,13 +221,9 @@ def reschedule(date):
         "appointments[consulate_appointment][time]": time,
     }
 
-    headers = {
-        "User-Agent": driver.execute_script("return navigator.userAgent;"),
-        "Referer": APPOINTMENT_URL,
-        "Cookie": "_yatri_session=" + driver.get_cookie("_yatri_session")["value"]
-    }
-
-    r = requests.post(APPOINTMENT_URL, headers=headers, data=data)
+    session = prepare_session()
+    r = session.post(APPOINTMENT_URL, data)
+    print("Reschedule response:", r)
     if(r.text.find('Successfully Scheduled') != -1):
         msg = f"Rescheduled Successfully! {date} {time}"
         send_notification(msg)
@@ -195,6 +235,7 @@ def reschedule(date):
 
 def is_logged_in():
     content = driver.page_source
+    # print(content)
     if(content.find("error") != -1):
         return False
     return True
@@ -236,13 +277,18 @@ def push_notification(dates):
         msg = msg + d.get('date') + '; '
     send_notification(msg)
 
+def print_next_attempt_time(seconds):
+    current_time = datetime.now()
+    new_time = current_time + timedelta(seconds=seconds)
+    print("Next attempt at: ", new_time)
 
 if __name__ == "__main__":
     login()
+    do_open_rescheduling()
     retry_count = 0
     while 1:
-        if retry_count > 6:
-            break
+        # if retry_count > 6:
+        #     break
         try:
             print("------------------")
             print(datetime.today())
@@ -261,22 +307,28 @@ if __name__ == "__main__":
             if date:
                 reschedule(date)
                 push_notification(dates)
-
-            if(EXIT):
-                print("------------------exit")
                 break
+            if(EXIT):
+                print("------------------")
 
             if not dates:
               msg = "List is empty"
               send_notification(msg)
               #EXIT = True
+              print("in Cooldown")
+              print_next_attempt_time(COOLDOWN_TIME)
               time.sleep(COOLDOWN_TIME)
             else:
+              print("Retrying")
+              print_next_attempt_time(RETRY_TIME)
               time.sleep(RETRY_TIME)
 
-        except:
+        except Exception as e:
             retry_count += 1
+            print("Exception", e)
+            print_next_attempt_time(RETRY_TIME)
             time.sleep(EXCEPTION_TIME)
 
     if(not EXIT):
         send_notification("HELP! Crashed.")
+    k = input("press close to exit")
